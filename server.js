@@ -1,153 +1,219 @@
 const express = require("express");
 const mongoose = require("mongoose");
-const logger = require("morgan");
-const request = require("request");
+var logger = require("morgan");
 
 var bodyParser = require('body-parser');
 const rp = require('request-promise');
-// Our scraping tools
 
-// qQuery for Node!
+var Comment = require("./models/Comment");
+var Article = require("./models/Article");
+
+const request = require("request");
 const cheerio = require("cheerio");
+// Set mongoose to leverage built in JavaScript ES6 Promises
 
-// Connect to the Mongo DB
-mongoose.connect(process.env.MONGODB_URI || "mongodb://localhost/mongoHeadlines", {
-    useNewUrlParser: true
-});
-const PORT = 3000;
-
-// Require all models
-var db = require("./models");
 
 // Initialize Express
 const app = express();
 
-app.use(bodyParser.json());
-// Parse request body as JSON
-app.use(bodyParser.urlencoded({
-    extended: true
-}));
-
-// mongoose.Promise = Promise;
-
-var nameSchema = new mongoose.Schema({
-    firstName: String,
-    lastName: String
-});
-
-var User = mongoose.model("newsHeadlines", nameSchema);
-
-// Configure middleware
-
-// Use morgan logger for logging requests
+// Use morgan and body parser with our app
 app.use(logger("dev"));
-// Parse request body as JSON
-app.use(express.urlencoded({
-    extended: true
+app.use(bodyParser.urlencoded({
+    extended: false
 }));
-
-app.use(express.json());
 
 
 
 // Make public a static folder
-app.use(express.static("public"));
+app.use(express.static("layouts"));
 
 
-// Routes
 
-// posting to db
-app.post("/addname", (req, res) => {
-    var myData = new User(req.body);
-    myData.save()
-        .then(item => {
-            res.send("item saved to database");
+// Set Handlebars
 
+var exphbs = require("express-handlebars");
+app.set('views', './views')
+app.engine("hbs", exphbs({
+    defaultLayout: "main",
+    extname: '.hbs'
+}));
+app.set("view engine", ".hbs");
+
+
+
+// Connect to the Mongo DB
+mongoose.connect(process.env.MONGODB_URI || "mongodb://localhost/Article", {
+    useNewUrlParser: true
+});
+mongoose.Promise = Promise;
+
+const db = mongoose.connection;
+
+// Show any mongoose errors
+db.on("error", function (error) {
+    console.log("Mongoose Error: ", error);
+});
+
+// Once logged in to the db through mongoose, log a success message
+db.once("open", function () {
+    console.log("Mongoose connection successful.");
+});
+
+
+
+// ROUTES
+// Default Home view
+app.get("/", function (req, res) {
+    // fetch articles from db
+    Article.find({})
+        .sort({
+            dateCreated: 1
         })
-        .catch(err => {
-            res.status(400).send("unable to save to database");
+        .exec(function (error, doc) {
+            // Log any errors
+            if (error) {
+                console.log("Error retrieving from db:", error);
+            } else {
+                // wrap the response for handlebars' benefit
+                var hbObject = {
+                    articles: doc
+                }
+                res.render('index', hbObject);
+            }
         });
 });
 
-// scrapping goodness 
-request('https://news.ycombinator.com', function (error, response, html) {
-    if (!error && response.statusCode == 200) {
-        var $ = cheerio.load(html);
-        var parsedResults = [];
-        $('span.comhead').each(function (i, element) {
-            // Select the previous element
-            var a = $(this).prev();
-            // Get the rank by parsing the element two levels above the "a" element
-            var rank = a.parent().parent().text();
-            // Parse the link title
-            var title = a.text();
-            // Parse the href attribute from the "a" element
-            var url = a.attr('href');
-            // Get the subtext children from the next row in the HTML table.
-            var subtext = a.parent().parent().next().children('.subtext').children();
-            // Extract the relevant data from the children
-            var points = $(subtext).eq(0).text();
-            var username = $(subtext).eq(1).text();
-            var comments = $(subtext).eq(2).text();
-            // Our parsed meta data object
-            var metadata = {
-                rank: parseInt(rank),
-                title: title,
-                url: url,
-                points: parseInt(points),
-                username: username,
-                comments: parseInt(comments)
-            };
-            // Push meta-data into parsedResults array
-            parsedResults.push(metadata);
 
 
-        });
-        // Log our finished parse results in the terminal
-        console.log(parsedResults);
-
-        // Route for getting all Articles from the db
-        app.get("/articles", function (req, response) {
-            // Grab every document in the Articles collection
-            db.Article.find({})
-                .then(function (dbArticle) {
-                    // If we were able to successfully find Articles, send them back to the client
-                    res.json(dbArticle);
-                })
-                .catch(function (err) {
-                    // If an error occurred, send it to the client
-                    res.json(err);
-                });
-        });
+// Scrape
+// app.get("/models", function (req, res) {
+// Point request current page at SlashDot
+request("https://news.google.com/?hl=en-US&gl=US&ceid=US:en", function (error, response, html) {
+    if (error) {
+        console.log("Request error:", error);
     }
+    // Hand it to cheerio and assign to "$"
+    var $ = cheerio.load(html);
+    // To avoid sponsored advertisement articles, select only articles with ids
+    $("article[id]").each(function (i, element) {
+        var result = {};
+        // Harvest the relevant portions of every article
+        // Drop the read count after the title
+        result.title = $(element).find("h2 span.story-title a").text();
+        result.link = $(element).find("h2 span.story-title a").attr("href");
+        result.summary = $(element).find("div.p").text().trim();
+        // Mongoose model powers activate! Form of: Article!
+        // To avoid adding duplicate entries, the "update" method creates a new document only if no matching title is found.
+        Article.update({
+            title: result.title
+        }, result, {
+            new: true,
+            upsert: true,
+            setDefaultsOnInsert: true
+        }, function (err, doc) {
+
+
+            if (err) {
+                console.log("Error:", err);
+            }
+        });
+        // redirect to render with new results
+        res.redirect("/");
+    });
+
 });
-
-
-
-// scrapping the web page
-// const options = {
-//     uri: `https://www.cnn.com/`,
-//     transform: function (body) {
-//         return cheerio.load(body);
-//     }
-// };
-
-// rp(options).then(($) => {
-//     console.log("hey hey hey hey!");
-//     console.log($.fn);
-// }).catch((err) => {
-//     console.log("Oops, there was a problem " + err);
 // });
 
 
 
 
 
+// Add an article to, or remove from, "saved" list
+app.post("/save/:route/:id", function (req, res) {
+    // to allow redirecting to multiple routes, take req.param.route
+    // but to redirect to '/', we'll have to pass something in and then convert to ''
+    if (req.params.route === "index") {
+        req.params.route = "";
+    }
+    // grab specific article from the db, then either add it to or remove it from the "saved" list based on the Boolean passed
+    Article.findOneAndUpdate({
+            "_id": req.params.id
+        }, {
+            "saved": req.body.saved
+        })
+        .exec(function (err, doc) {
+            if (err) {
+                console.log(err);
+            } else {
+                console.log('doc', doc)
+                res.redirect('/' + req.params.route);
+            }
+        })
+});
+
+// Render "Saved" list
+app.get("/saved", function (req, res) {
+    Article.find({
+            "saved": true
+        })
+        .populate("comments")
+        .sort({
+            dateCreated: 1
+        })
+        .exec(function (err, doc) {
+            if (err) {
+                console.log(err);
+            } else {
+                console.log(doc);
+                var hbObject = {
+                    articles: doc
+                }
+                console.log('hbObject:', hbObject);
+                res.render('saved', hbObject);
+            }
+        });
+});
+
+// Create a new comment or replace an existing comment
+app.post("/Comment/:id", function (req, res) {
+    // Create a new comment and pass the req.body to the entry
+    var newComment = new Comment(req.body);
+    // And save the new comment the db
+    newComment.save(function (error, doc) {
+        // Log any errors
+        if (error) {
+            console.log(error);
+        }
+        // Otherwise
+        else {
+            // Use the article id to find and update its comments
+            Article.findOneAndUpdate({
+                    "_id": req.params.id
+                }, {
+                    $push: {
+                        "comments": doc._id
+                    }
+                }, {
+                    new: true
+                })
+                // Execute the above query
+                .exec(function (err, doc) {
+                    // Log any errors
+                    if (err) {
+                        console.log(err);
+                    } else {
+                        res.redirect('/saved');
+                    }
+                });
+        }
+    });
+});
 
 
 
 
-// Start the server
+
+var PORT = process.env.PORT || 3000;
 app.listen(PORT, function () {
-    console.log("App running on port " + PORT + "!");
+    console.log("App running on port", PORT);
 });
